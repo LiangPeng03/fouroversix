@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import modal
+import time
 import torch
 from fouroversix import (
     DataType,
@@ -81,7 +82,10 @@ class PTQEvaluator(ABC):
         """Evaluate a quantized model with lm-eval."""
 
         with torch.inference_mode():
-            model_config = AutoConfig.from_pretrained(model_name)
+            model_config = AutoConfig.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
             quantization_config = ModelQuantizationConfig(
                 activation_dtype=activation_dtype,
                 activation_scale_rule=activation_scale_rule,
@@ -89,8 +93,8 @@ class PTQEvaluator(ABC):
                 matmul_backend=matmul_backend,
                 output_dtype=DataType(
                     (
-                        str(model_config.dtype).replace("torch.", "")
-                        if model_config.dtype is not None
+                        str(getattr(model_config, "dtype", None)).replace("torch.", "")
+                        if getattr(model_config, "dtype", None) is not None
                         else "bfloat16"
                     ),
                 ),
@@ -100,6 +104,13 @@ class PTQEvaluator(ABC):
                 weight_dtype=weight_dtype,
                 weight_scale_rule=weight_scale_rule,
             )
+
+            # The CUDA quantize/matmul backends only work reliably with bfloat16
+            # on Blackwell GPUs. Even though model_config may say float16 (e.g.
+            # Llama-2-7b), loading as float16 triggers "Backend cuda does not
+            # support the given parameters" during activation quantization.
+            # bfloat16 is safe for all models and has comparable precision.
+            _model_torch_dtype = torch.bfloat16
 
             # When running locally with --gpus-per-worker > 1, device will be a
             # string like "cuda:0,1,2,3", but this is not a valid torch device.
@@ -120,6 +131,7 @@ class PTQEvaluator(ABC):
                         )
                         for i in range(torch.cuda.device_count())
                     },
+                    "torch_dtype": _model_torch_dtype,
                     "trust_remote_code": trust_remote_code,
                 }
 
@@ -127,9 +139,21 @@ class PTQEvaluator(ABC):
             else:
                 from_pretrained_kwargs = {
                     "device_map": device,
+                    "torch_dtype": _model_torch_dtype,
                     "trust_remote_code": trust_remote_code,
                 }
 
+            seed = kwargs.pop("seed", None)
+            if seed is not None:
+                import random
+                import numpy as np
+                torch.manual_seed(seed)
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+
+            quant_start = time.time()
             model = self.quantize_model(
                 model_name=model_name,
                 force_requantize_model=force_requantize_model,
@@ -138,41 +162,142 @@ class PTQEvaluator(ABC):
                 from_pretrained_kwargs=from_pretrained_kwargs,
                 **kwargs,
             )
+            quant_end = time.time()
+            print(f"QUANT_TIME: {quant_end - quant_start:.2f}")
 
-            if eval_framework == EvaluationFramework.lm_eval:
+            eval_start = time.time()
+            # ---------- Custom PPL tasks (MR-GPTQ style) ----------
+            ppl_tasks = [t for t in tasks if t in ("wikitext2", "c4")]
+            lm_eval_tasks = [t for t in tasks if t not in ("wikitext2", "c4")]
+            results = []
+
+            # Load tokenizer unconditionally so it can be passed to HFLM later
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=trust_remote_code
+            )
+
+            if ppl_tasks:
+                from .perplexity_mr_gptq import compute_perplexity, get_wikitext2, get_c4_eval
+
+                model.to(device)
+                model.config.use_cache = True
+
+                for ppl_task in ppl_tasks:
+                    seq_len = max_length or 2048
+                    if ppl_task == "wikitext2":
+                        eval_data = get_wikitext2(tokenizer, seq_len)
+                        ppl = compute_perplexity(model, eval_data)
+                        results.append(
+                            (
+                                "wikitext2",
+                                "perplexity,none",
+                                ppl,
+                                {"perplexity,none": ppl},
+                            )
+                        )
+                        del eval_data
+                    elif ppl_task == "c4":
+                        c4_data = get_c4_eval(tokenizer, seq_len)
+                        ppl = compute_perplexity(model, c4_data)
+                        results.append(
+                            (
+                                "c4",
+                                "perplexity,none",
+                                ppl,
+                                {"perplexity,none": ppl},
+                            )
+                        )
+                        del c4_data
+                    torch.cuda.empty_cache()
+            # -------------------------------------------------------
+
+            if eval_framework == EvaluationFramework.lm_eval and lm_eval_tasks:
                 from lm_eval import evaluator
                 from lm_eval.models.huggingface import HFLM
                 from lm_eval.tasks import TaskManager
 
-                eval_kwargs = {
-                    "model": HFLM(
-                        pretrained=model,
-                        device=device,
-                        max_length=max_length,
-                    ),
+                _orig_max_pos = model.config.max_position_embeddings
+                model.config.max_position_embeddings = min(model.config.max_position_embeddings, 2048)
+
+                # Move model to a single device to avoid device-mismatch errors
+                # after quantization (quantized layers may end up on CPU when
+                # model was loaded with device_map="auto")
+                model.to(device)
+
+                task_configs = {
+                    "winogrande": {"num_fewshot": 5, "batch_size": 64},
+                    "hellaswag": {"num_fewshot": 10, "batch_size": 8},
+                    "piqa": {"num_fewshot": 0, "batch_size": 64},
+                    "arc_challenge": {"num_fewshot": 25, "batch_size": 8},
+                    "boolq": {"num_fewshot": 0, "batch_size": 8},
+                    "gsm8k": {"num_fewshot": 5, "batch_size": 16},
+                    "mmlu": {"num_fewshot": 5, "batch_size": 4, "limit": 200},
+                    "arc_easy": {"num_fewshot": 25, "batch_size": 8, "limit": 4000},
+                    "mbpp": {"num_fewshot": 3, "batch_size": 16},
+                    "lambada_openai": {"num_fewshot": 0, "batch_size": 16},
+                    "gsm8k_llama": {
+                        "num_fewshot": 0,
+                        "batch_size": 8,
+                        "apply_chat_template": True,
+                        "fewshot_as_multiturn": True,
+                    },
+                    "mmlu_cot_llama": {
+                        "num_fewshot": 0,
+                        "batch_size": 8,
+                        "apply_chat_template": True,
+                        "fewshot_as_multiturn": True,
+                    },
                 }
 
-                full_results = evaluator.simple_evaluate(
-                    tasks=tasks,
-                    device=device,
-                    limit=limit,
-                    task_manager=TaskManager(
-                        include_path=(
-                            Path(__file__).parent.parent / "tasks"
-                        ).as_posix(),
-                    ),
-                    **eval_kwargs,
-                )
+                for task_name in lm_eval_tasks:
+                    cfg = task_configs.get(task_name, {"num_fewshot": 0, "batch_size": 1})
+                    batch_size = cfg["batch_size"]
+                    num_fewshot = cfg.get("num_fewshot", 0)
+                    extra_kwargs = {k: v for k, v in cfg.items() if k not in ("batch_size", "num_fewshot")}
 
-                results = []
+                    # Use task-specific limit if set, otherwise fall back to defaults
+                    task_limit = cfg.get("limit")
+                    if task_limit is None:
+                        if task_name in ("hellaswag", "arc_challenge"):
+                            task_limit = 400
+                        else:
+                            task_limit = limit
 
-                for task in full_results["results"]:
-                    result = full_results["results"][task]
+                    lm = HFLM(
+                        pretrained=model,
+                        tokenizer=tokenizer,
+                        device=device,
+                        max_length=max_length,
+                        batch_size=batch_size,
+                    )
+
+                    task_results = evaluator.simple_evaluate(
+                        model=lm,
+                        tasks=[task_name],
+                        device=device,
+                        limit=task_limit,
+                        num_fewshot=num_fewshot,
+                        task_manager=TaskManager(
+                            include_path=(
+                                Path(__file__).parent.parent / "tasks"
+                            ).as_posix(),
+                        ),
+                        **extra_kwargs,
+                    )
+
+                    result = task_results["results"][task_name]
 
                     if "acc_norm,none" in result:
                         metric_name = "acc_norm,none"
                     elif "acc,none" in result:
                         metric_name = "acc,none"
+                    elif "exact_match,strict-match" in result:
+                        metric_name = "exact_match,strict-match"
+                    elif "exact_match,none" in result:
+                        metric_name = "exact_match,none"
+                    elif "pass@1,none" in result:
+                        metric_name = "pass@1,none"
                     elif "word_perplexity,none" in result:
                         metric_name = "word_perplexity,none"
                     else:
@@ -180,14 +305,19 @@ class PTQEvaluator(ABC):
 
                     results.append(
                         (
-                            task,
+                            task_name,
                             metric_name,
                             result.get(metric_name),
-                            full_results["results"][task],
+                            result,
                         ),
                     )
 
-            elif eval_framework == EvaluationFramework.inspect_ai:
+                    del lm
+                    torch.cuda.empty_cache()
+
+                model.config.max_position_embeddings = _orig_max_pos
+
+            elif eval_framework == EvaluationFramework.inspect_ai and lm_eval_tasks:
                 import inspect_ai
                 from inspect_ai.model import Model
                 from inspect_ai.model._generate_config import GenerateConfig
@@ -196,15 +326,13 @@ class PTQEvaluator(ABC):
 
                 config = GenerateConfig()
                 full_results = inspect_ai.eval(
-                    tasks=tasks,
+                    tasks=lm_eval_tasks,
                     model=Model(local_hf(model_name, model, config), config, None),
                     limit=limit,
                     log_dir=(save_path / "inspect_ai_logs").as_posix(),
                     log_realtime=True,
                     display="none",
                 )
-
-                results = []
 
                 for log in full_results:
                     metrics = {
@@ -226,6 +354,9 @@ class PTQEvaluator(ABC):
 
             del model
             torch.cuda.empty_cache()
+
+            eval_end = time.time()
+            print(f"EVAL_TIME: {eval_end - eval_start:.2f}")
 
         return results
 

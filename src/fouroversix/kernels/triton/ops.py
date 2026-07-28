@@ -5,7 +5,10 @@ import triton
 import triton.language as tl
 from fouroversix.quantize import QuantizedTensor, from_blocked
 from fouroversix.utils import DataType, RoundStyle, ScaleRule, ScaleType
-from triton.tools.tensor_descriptor import TensorDescriptor
+try:
+    from triton.tools.tensor_descriptor import TensorDescriptor
+except ImportError:
+    from triton.tools.experimental_descriptor import TensorDescriptor
 
 from .constants import SCALE_MEGABLOCK_SIZE
 from .dequantize import dequantize_with_tensor_descriptors

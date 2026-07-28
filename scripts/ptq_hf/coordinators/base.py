@@ -75,9 +75,15 @@ class BaseEvaluationCoordinator(ABC):
     ) -> None:
         """Save the results of a PTQ experiment to the SQLite database."""
 
+        import math
+
         session = self.get_session()
 
         for task, metric_name, metric_value, full_results in results:
+            if isinstance(metric_value, float) and (math.isnan(metric_value) or math.isinf(metric_value)):
+                print(f"[DB Skip] {model_name} {ptq_method.value} {task}/{metric_name}: metric_value={metric_value}, skipping DB write.")
+                continue
+
             experiment = Experiment(
                 hostname=socket.gethostname(),
                 group_name=self.group_name,

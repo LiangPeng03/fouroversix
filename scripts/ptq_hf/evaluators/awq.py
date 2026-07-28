@@ -82,6 +82,27 @@ class AWQEvaluator(RTNEvaluatorImpl):
         from fouroversix import quantize_model
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        # Monkey-patch apply_rotary_pos_emb to fix dtype mismatch:
+        # RoPE cos/sin are computed in float32; even after cos.to(dtype=x.dtype),
+        # PyTorch's type promotion rules make bfloat16 * float32 = float32,
+        # causing query/key to be float32 while value stays bfloat16
+        # in scaled_dot_product_attention.
+        import transformers.models.llama.modeling_llama as llama_module
+
+        _original_apply_rope = llama_module.apply_rotary_pos_emb
+
+        def _patched_apply_rope(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+            q_embed, k_embed = _original_apply_rope(
+                q, k, cos, sin, position_ids, unsqueeze_dim
+            )
+            # Force output dtype to match the original input dtype,
+            # preventing silent float32 promotion from bfloat16.
+            q_embed = q_embed.to(dtype=q.dtype)
+            k_embed = k_embed.to(dtype=k.dtype)
+            return q_embed, k_embed
+
+        llama_module.apply_rotary_pos_emb = _patched_apply_rope
+
         # Replace FourOverSixLinear with FourOverSixLinearForAWQ
         QuantizedModule.register(
             nn.Linear,
@@ -107,11 +128,24 @@ class AWQEvaluator(RTNEvaluatorImpl):
                 ),
             )
 
+            import math
+
+            config = model.config
+            hidden = getattr(config, "hidden_size", None)
+            intermediate = getattr(config, "intermediate_size", None)
+            q_group_size = 128
+            if hidden is not None and intermediate is not None:
+                for gs in (128, 64, 32, 16, 8, 4, 2, 1):
+                    if hidden % gs == 0 and intermediate % gs == 0:
+                        q_group_size = gs
+                        break
+            print(f"[AWQ] Using q_group_size={q_group_size} for hidden={hidden}, intermediate={intermediate}")
+
             awq_results = run_awq(
                 model,
                 enc,
                 w_bit=16,
-                q_config={"q_group_size": -1, "zero_point": False},
+                q_config={"q_group_size": q_group_size, "zero_point": False},
                 n_samples=128,
                 seqlen=512,
                 calib_data="wikitext",
@@ -119,6 +153,11 @@ class AWQEvaluator(RTNEvaluatorImpl):
 
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             torch.save(awq_results, save_path)
+
+        # NOTE: We intentionally do NOT restore the original apply_rotary_pos_emb
+        # here because the patch is needed for the subsequent perplexity evaluation
+        # as well (the same bfloat16 * float32 dtype promotion happens during
+        # inference with the quantized model).
 
         model = AutoModelForCausalLM.from_pretrained(
             model_name,

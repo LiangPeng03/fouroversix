@@ -1,0 +1,17 @@
+
+==========================================================
+Batch Run Started at: Tue Jul 28 02:40:56 CST 2026 on GPUs: 0
+Model                          | PTQ          | GSM8K    | MMLU     | ARC-E    | MBPP     | LAMBADA  | Quant(min) | Eval(min)
+----------------------------------------------------------
+
+==========================================================
+Batch Run Started at: Tue Jul 28 02:44:22 CST 2026 on GPUs: 0
+Model                          | PTQ          | GSM8K    | MMLU     | ARC-E    | MBPP     | LAMBADA  | Quant(min) | Eval(min)
+----------------------------------------------------------
+==========================================================
+
+
+==========================================================
+Batch Run Started at: Tue Jul 28 11:50:08 CST 2026 on GPUs: 0,1
+Model                          | PTQ          | GSM8K    | MMLU     | ARC-E    | MBPP     | LAMBADA  | Quant(min) | Eval(min)
+----------------------------------------------------------

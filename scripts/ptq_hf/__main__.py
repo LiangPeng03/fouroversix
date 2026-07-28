@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-import modal
 from fouroversix.utils import DataType, MatmulBackend, QuantizeBackend, ScaleRule
 
 from ..resources import app
@@ -57,6 +56,7 @@ from .utils import EvaluationFramework, PTQMethod
 )
 @click.option("--save-path", type=Path, default=None)
 @click.option("--scale-rule", type=ScaleRule, default=ScaleRule.mse)
+@click.option("--seed", type=int, default=0)
 @click.option("--task", "-t", type=str, multiple=True, default=["wikitext"])
 @click.option("--trust-remote-code", is_flag=True)
 @click.option("--weight-dtype", "--w-dtype", type=DataType, default=None)
@@ -98,6 +98,7 @@ def cli(
         raise ValueError(msg)
 
     if use_modal:
+        import modal
         with modal.enable_output(), app.run(detach=detach):
             coordinator = ModalEvaluationCoordinator(
                 database_path_str=db_path.as_posix() if db_path is not None else "",
