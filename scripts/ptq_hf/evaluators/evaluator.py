@@ -254,7 +254,7 @@ class PTQEvaluator(ABC):
                     cfg = task_configs.get(task_name, {"num_fewshot": 0, "batch_size": 1})
                     batch_size = cfg["batch_size"]
                     num_fewshot = cfg.get("num_fewshot", 0)
-                    extra_kwargs = {k: v for k, v in cfg.items() if k not in ("batch_size", "num_fewshot")}
+                    extra_kwargs = {k: v for k, v in cfg.items() if k not in ("batch_size", "num_fewshot", "limit")}
 
                     # Use task-specific limit if set, otherwise fall back to defaults
                     task_limit = cfg.get("limit")
@@ -278,6 +278,7 @@ class PTQEvaluator(ABC):
                         device=device,
                         limit=task_limit,
                         num_fewshot=num_fewshot,
+                        confirm_run_unsafe_code=True,   
                         task_manager=TaskManager(
                             include_path=(
                                 Path(__file__).parent.parent / "tasks"
@@ -296,6 +297,8 @@ class PTQEvaluator(ABC):
                         metric_name = "exact_match,strict-match"
                     elif "exact_match,none" in result:
                         metric_name = "exact_match,none"
+                    elif "pass_at_1,none" in result:
+                        metric_name = "pass_at_1,none"
                     elif "pass@1,none" in result:
                         metric_name = "pass@1,none"
                     elif "word_perplexity,none" in result:

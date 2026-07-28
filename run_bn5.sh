@@ -28,11 +28,13 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export TRANSFORMERS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
 export PYTHONWARNINGS="ignore"
+export HF_ALLOW_CODE_EVAL="1" 
 
 # --- Inline Python helper to parse stdout results ---
 parse_results() {
 python3 -c "
 import sys, re
+import numpy as np
 text = sys.stdin.read()
 lines = text.split('\n')
 results = {}
@@ -66,8 +68,8 @@ def fmt(v, p):
 gsm8k  = get_metric('gsm8k', ['exact_match,strict-match', 'exact_match,none'])
 mmlu   = get_metric('mmlu', ['acc_norm,none', 'acc,none'])
 arc_e  = get_metric('arc_easy', ['acc_norm,none', 'acc,none'])
-mbpp   = get_metric('mbpp', ['pass@1,none'])
-lambada = get_metric('lambada_openai', ['word_perplexity,none', 'perplexity,none'])
+mbpp   = get_metric('mbpp', ['pass_at_1,none', 'pass@1,none'])
+lambada = get_metric('lambada_openai', ['acc,none', 'acc_norm,none'])
 
 print(f'{fmt(gsm8k,4)} | {fmt(mmlu,4)} | {fmt(arc_e,4)} | {fmt(mbpp,4)} | {fmt(lambada,3)}')
 "
