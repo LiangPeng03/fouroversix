@@ -14,11 +14,11 @@ LOG_FILE="4o6_eval_summary.log"
 PYTHON_BIN="python"
 
 MODELS=(
-    # "HuggingFaceTB/SmolLM2-135M"
+    "HuggingFaceTB/SmolLM2-135M"
     # "meta-llama/Llama-2-7b-hf"
-    # "meta-llama/Meta-Llama-3-8B"
-    # "Qwen/Qwen3-0.6B"
-    # "Qwen/Qwen3-8B"
+    "Qwen/Qwen3-0.6B"
+    "meta-llama/Meta-Llama-3-8B"
+    "Qwen/Qwen3-8B"
     "meta-llama/Llama-3.2-1B"
     "Qwen/Qwen3-1.7B"
 )
@@ -103,7 +103,7 @@ echo "----------------------------------------------------------" >> $LOG_FILE
 # --- Build task list ---
 TASKS=()
 for MODEL in "${MODELS[@]}"; do
-    for PTQ in "high_precision" "awq"; do
+    for PTQ in "awq"; do
         TASKS+=("$MODEL|$PTQ")
     done
 done
@@ -137,8 +137,6 @@ for (( i=0; i<${#TASKS[@]}; i++ )); do
             $DTYPE_ARG \
             --quantize-backend cuda \
             --matmul-backend cutlass \
-            --task wikitext2 --task c4 \
-            --task piqa --task winogrande --task boolq \
             --task hellaswag --task arc_challenge \
             > "$tmp" 2>&1
 

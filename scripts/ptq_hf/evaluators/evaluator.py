@@ -259,8 +259,8 @@ class PTQEvaluator(ABC):
                     # Use task-specific limit if set, otherwise fall back to defaults
                     task_limit = cfg.get("limit")
                     if task_limit is None:
-                        if task_name in ("hellaswag", "arc_challenge"):
-                            task_limit = 400
+                        if task_name in ("hellaswag"):
+                            task_limit = 4000
                         else:
                             task_limit = limit
 
