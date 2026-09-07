@@ -1,0 +1,21 @@
+# ninja log v7
+4	23543	1786697922395441000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/bindings.o	d882c781ef230732
+7	109882	1786697922398176000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant.o	4d00c8b307de32cf
+15	112986	1786697922406432000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_sm100.o	568ccafd2e2e14ec
+18	115627	1786697922408730000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_rht_trans_sm100.o	aa94d643d7ae3cf
+19	117257	1786697922410147000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_trans_sm100.o	c13f41f3829d32b0
+14	117725	1786697922404620000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_rht_sm100.o	819a07265aed3f63
+9	121931	1786697922400312000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_sm100.o	ee6f81bd8760087
+19	122659	1786697922409464000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_sm100.o	1d55cf3ad61c42a9
+11	123791	1786697922402420000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_rht_trans_sm100.o	ef77e25d5a12fc27
+10	124490	1786697922400999000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_trans_sm100.o	d3936d31ad2e09a
+14	125855	1786697922405494000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_rht_trans_sm100.o	c8fca653291cc80b
+17	126035	1786697922408032000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_rht_sm100.o	12f2cb2fb5be05e4
+11	126556	1786697922401723000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_rht_sm100.o	55326a7307ea0ba
+9	126646	1786697922399648000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_rht_trans_sm100.o	7c95cc228f2c4491
+13	126742	1786697922403894000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_trans_sm100.o	ead1e5ff74954a5e
+12	126938	1786697922403177000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_sm100.o	d1129568a9abd175
+8	127903	1786697922398954000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_rht_sm100.o	113098221021d5b0
+16	128134	1786697922407193000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_trans_sm100.o	3b1c42c373e181bc
+5	199504	1786697922396568000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/fp4_gemm.o	57e0f4e48c38dbb1
+6	202474	1786697922397357000	/home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/fp4_gemm_sm120.o	7e161426d9e2f1cf

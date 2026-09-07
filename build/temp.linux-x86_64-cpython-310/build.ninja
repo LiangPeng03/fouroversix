@@ -1,0 +1,56 @@
+ninja_required_version = 1.3
+cxx = /home/pengliang/.conda/envs/4o6/bin/x86_64-conda-linux-gnu-c++
+nvcc = /home/pengliang/.conda/envs/4o6/bin/nvcc
+
+cflags = -march=nocona -mtune=haswell -ftree-vectorize -fPIC -fstack-protector-strong -fno-plt -O2 -ffunction-sections -pipe -isystem /home/pengliang/.conda/envs/4o6/include -I/home/pengliang/.conda/envs/4o6/targets/x86_64-linux/include -DNDEBUG -D_FORTIFY_SOURCE=2 -O2 -isystem /home/pengliang/.conda/envs/4o6/include -I/home/pengliang/.conda/envs/4o6/targets/x86_64-linux/include -fPIC -I/home/pengliang/Desktop/fouroversix/third_party/cutlass/examples/common -I/home/pengliang/Desktop/fouroversix/third_party/cutlass/include -I/home/pengliang/Desktop/fouroversix/third_party/cutlass/tools/util/include -I/home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/include -I/home/pengliang/.conda/envs/awq/lib/python3.10/site-packages/torch/include -I/home/pengliang/.conda/envs/awq/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/pengliang/.conda/envs/4o6/include -I/home/pengliang/.conda/envs/awq/include/python3.10 -c
+post_cflags = -std=c++17 -O3 -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1016"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=1
+cuda_cflags = -I/home/pengliang/Desktop/fouroversix/third_party/cutlass/examples/common -I/home/pengliang/Desktop/fouroversix/third_party/cutlass/include -I/home/pengliang/Desktop/fouroversix/third_party/cutlass/tools/util/include -I/home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/include -I/home/pengliang/.conda/envs/awq/lib/python3.10/site-packages/torch/include -I/home/pengliang/.conda/envs/awq/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/pengliang/.conda/envs/4o6/include -I/home/pengliang/.conda/envs/awq/include/python3.10 -c
+cuda_post_cflags = -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -std=c++17 --expt-relaxed-constexpr -Xcompiler -funroll-loops -Xcompiler -finline-functions -gencode arch=compute_120f,code=sm_120 -O3 -DNDEBUG -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1016"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=1 -ccbin /home/pengliang/.conda/envs/4o6/bin/x86_64-conda-linux-gnu-cc
+cuda_dlink_post_cflags = 
+sycl_dlink_post_cflags = 
+ldflags = 
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+
+
+
+
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/bindings.o: compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/bindings.cpp
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/fp4_gemm.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/fp4_gemm.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/fp4_gemm_sm120.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/fp4_gemm_sm120.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_rht_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_rht_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_rht_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_rht_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_mxfp4_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_rht_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_rht_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_rht_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_rht_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_bf16_nvfp4_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_rht_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_rht_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_rht_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_rht_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_mxfp4_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_rht_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_rht_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_rht_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_rht_trans_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_sm100.cu
+build /home/pengliang/Desktop/fouroversix/build/temp.linux-x86_64-cpython-310/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_trans_sm100.o: cuda_compile /home/pengliang/Desktop/fouroversix/src/fouroversix/csrc/quantize/fp4_quant_fp16_nvfp4_trans_sm100.cu
+
+
+
+
+
+
+
+
