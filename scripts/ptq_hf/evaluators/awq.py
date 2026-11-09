@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+from hashlib import sha256
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -78,6 +82,7 @@ class AWQEvaluator(RTNEvaluatorImpl):
         """Quantize a model using AWQ."""
 
         import torch
+        from awq.quantize import pre_quant
         from awq.quantize.pre_quant import apply_awq, run_awq
         from fouroversix import quantize_model
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -109,7 +114,21 @@ class AWQEvaluator(RTNEvaluatorImpl):
             replace_existing_modules_in_registry=True,
         )(FourOverSixLinearForAWQ)
 
-        save_path = save_path / "awq" / model_name / quantization_config.__hash__()
+        token_path = os.environ.get("NADA_CALIBRATION_TOKENS")
+        tokens = None
+        if token_path:
+            token_file = Path(token_path)
+            tokens = torch.load(token_file, map_location="cpu", weights_only=True)
+            if not isinstance(tokens, torch.Tensor) or tokens.dtype != torch.long or tuple(tokens.shape) != (128, 2048):
+                raise ValueError("Expected a torch.long calibration tensor shaped (128, 2048)")
+            digest = sha256(token_file.read_bytes()).hexdigest()
+            save_path = (
+                save_path / "awq_c4_128x2048" / model_name.rstrip("/").split("/")[-1]
+                / digest / quantization_config.__hash__()
+            )
+            print(f"Shared C4 calibration tokens: {token_file} SHA256={digest}")
+        else:
+            save_path = save_path / "awq" / model_name / quantization_config.__hash__()
 
         if force_requantize_model or not save_path.exists():
             model = AutoModelForCausalLM.from_pretrained(
@@ -141,15 +160,31 @@ class AWQEvaluator(RTNEvaluatorImpl):
                         break
             print(f"[AWQ] Using q_group_size={q_group_size} for hidden={hidden}, intermediate={intermediate}")
 
-            awq_results = run_awq(
-                model,
-                enc,
-                w_bit=16,
-                q_config={"q_group_size": q_group_size, "zero_point": False},
-                n_samples=128,
-                seqlen=512,
-                calib_data="wikitext",
-            )
+            supplied_tokens = False
+
+            def load_shared_tokens(*args, **kwargs):
+                nonlocal supplied_tokens
+                supplied_tokens = True
+                return list(tokens.split(1))
+
+            with ExitStack() as calibration:
+                if tokens is not None:
+                    from awq.utils import calib_data
+
+                    calibration.enter_context(patch.object(calib_data, "get_calib_dataset", load_shared_tokens))
+                    if hasattr(pre_quant, "get_calib_dataset"):
+                        calibration.enter_context(patch.object(pre_quant, "get_calib_dataset", load_shared_tokens))
+                awq_results = run_awq(
+                    model,
+                    enc,
+                    w_bit=16,
+                    q_config={"q_group_size": q_group_size, "zero_point": False},
+                    n_samples=128,
+                    seqlen=2048 if tokens is not None else 512,
+                    calib_data="c4" if tokens is not None else "wikitext",
+                )
+            if tokens is not None and not supplied_tokens:
+                raise RuntimeError("Installed AWQ did not read the shared C4 tokens.")
 
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             torch.save(awq_results, save_path)
