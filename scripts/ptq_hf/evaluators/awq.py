@@ -77,21 +77,47 @@ def _awq_forward(module, inputs, kwargs):
     return output[0] if isinstance(output, tuple) else output
 
 
+def _awq_batch_kwargs(sample_kwargs, start, stop, device):
+    """Combine per-sequence masks and RoPE, preserving shared cache positions."""
+    def combine(values):
+        first = values[0]
+        if isinstance(first, torch.Tensor):
+            if first.ndim >= 2 and first.shape[0] == 1:
+                return torch.cat(values, dim=0).to(device)
+            if not all(torch.equal(first, value) for value in values[1:]):
+                raise ValueError("AWQ received incompatible shared position tensors")
+            return first.to(device)
+        if isinstance(first, dict):
+            return {key: combine([value[key] for value in values]) for key in first}
+        if isinstance(first, tuple):
+            return tuple(combine([value[index] for value in values])
+                         for index in range(len(first)))
+        if isinstance(first, list):
+            return [combine([value[index] for value in values])
+                    for index in range(len(first))]
+        if any(value != first for value in values[1:]):
+            raise ValueError("AWQ received incompatible per-sequence kwargs")
+        return first
+    return combine(sample_kwargs[start:stop])
+
+
 @torch.no_grad()
-def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_config):
-    """Evaluate each original AWQ candidate over every sequence, one at a time."""
+def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_config,
+                              batch_size):
+    """Evaluate every AWQ candidate over all sequences using bounded batches."""
     from awq.quantize.quantizer import pseudo_quantize_tensor
 
     device = next(block.parameters()).device
     channel_sum = torch.zeros(inputs.shape[-1], dtype=torch.float32)
     num_tokens = 0
     references = []
-    for index in range(inputs.shape[0]):
-        sample = inputs[index:index + 1]
+    for start in range(0, inputs.shape[0], batch_size):
+        stop = start + batch_size
+        sample = inputs[start:stop]
         channel_sum += sample.float().abs().reshape(-1, sample.shape[-1]).sum(0)
         num_tokens += sample.numel() // sample.shape[-1]
-        kwargs = _awq_to(sample_kwargs[index], device)
-        references.append(_awq_forward(block, sample.to(device), kwargs).cpu())
+        kwargs = _awq_batch_kwargs(sample_kwargs, start, stop, device)
+        references.append((start, _awq_forward(block, sample.to(device), kwargs).cpu()))
     x_max = (channel_sum / num_tokens).to(device=device, dtype=inputs.dtype)
     original_state = {
         key: value.detach().cpu().clone() for key, value in block.state_dict().items()
@@ -112,9 +138,10 @@ def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_co
                 del quantized
             squared_error = 0.0
             num_values = 0
-            for index, reference in enumerate(references):
-                kwargs = _awq_to(sample_kwargs[index], device)
-                output = _awq_forward(block, inputs[index:index + 1].to(device), kwargs)
+            for start, reference in references:
+                stop = start + batch_size
+                kwargs = _awq_batch_kwargs(sample_kwargs, start, stop, device)
+                output = _awq_forward(block, inputs[start:stop].to(device), kwargs)
                 error = (reference.to(device) - output).float()
                 squared_error += error.square().sum(dtype=torch.float64).item()
                 num_values += error.numel()
@@ -132,8 +159,8 @@ def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_co
 
 
 @torch.no_grad()
-def run_awq_batched(model, samples, w_bit, q_config):
-    """Layer-wise Llama/Qwen AWQ with CPU activation caches and GPU batch size 1."""
+def run_awq_batched(model, samples, w_bit, q_config, batch_size=8):
+    """Layer-wise Llama/Qwen AWQ with CPU activation caches and bounded batches."""
     from awq.quantize import pre_quant
     from awq.utils.module import append_str_prefix, get_op_name
     from tqdm import tqdm
@@ -181,7 +208,7 @@ def run_awq_batched(model, samples, w_bit, q_config):
     del captured_inputs
     results = {"scale": [], "clip": []}
     print(f"[AWQ batched] sequences={len(samples)} seqlen={samples[0].shape[1]} "
-          "GPU batch=1 candidates=20")
+          f"GPU batch={batch_size} candidates=20")
 
     for layer_index, layer in enumerate(tqdm(layers, desc="Running batched AWQ")):
         torch.cuda.reset_peak_memory_stats()
@@ -198,10 +225,11 @@ def run_awq_batched(model, samples, w_bit, q_config):
         try:
             for name, linear in pre_quant.get_named_linears(layer).items():
                 handles.append(linear.register_forward_hook(make_hook(name)))
-            for index in range(inputs.shape[0]):
+            for start in range(0, inputs.shape[0], batch_size):
+                stop = start + batch_size
                 output = _awq_forward(
-                    layer, inputs[index:index + 1].to("cuda"),
-                    _awq_to(sample_kwargs[index], "cuda"),
+                    layer, inputs[start:stop].to("cuda"),
+                    _awq_batch_kwargs(sample_kwargs, start, stop, "cuda"),
                 )
                 next_inputs.append(output.cpu())
                 del output
@@ -229,7 +257,8 @@ def run_awq_batched(model, samples, w_bit, q_config):
         scales_list = []
         for previous, linears, feature_name, inspected, kwargs in specs:
             scales = _search_awq_scale_batched(
-                inspected, linears, features[feature_name], kwargs, w_bit, q_config
+                inspected, linears, features[feature_name], kwargs, w_bit, q_config,
+                batch_size,
             )
             scales_list.append((
                 get_op_name(layer, previous),
@@ -341,10 +370,14 @@ class AWQEvaluator(RTNEvaluatorImpl):
         smoke_test = os.environ.get("FOUROVERSIX_SMOKE_TEST") == "1"
         sample_count = 2 if smoke_test else 128
         sequence_length = 512 if smoke_test else 2048
+        batch_size = int(os.environ.get("FOUROVERSIX_AWQ_BATCH_SIZE", "8"))
+        if batch_size < 1:
+            raise ValueError("FOUROVERSIX_AWQ_BATCH_SIZE must be positive")
+        batch_size = min(batch_size, sample_count)
         if smoke_test:
             print("[SMOKE TEST] AWQ calibration: C4, 2 x 512 tokens")
         save_path = (
-            save_path / f"awq_c4_{sample_count}x{sequence_length}_batch1_v2" / model_name.strip("/")
+            save_path / f"awq_c4_{sample_count}x{sequence_length}_batch{batch_size}_v2" / model_name.strip("/")
             / f"seed{calibration_seed}" / quantization_config.__hash__()
         )
 
@@ -382,6 +415,7 @@ class AWQEvaluator(RTNEvaluatorImpl):
             awq_results = run_awq_batched(
                 model, samples, w_bit=16,
                 q_config={"q_group_size": q_group_size, "zero_point": False},
+                batch_size=batch_size,
             )
 
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
