@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import modal
+import os
 import time
 import torch
 from fouroversix import (
@@ -188,6 +189,9 @@ class PTQEvaluator(ABC):
                     seq_len = max_length or 2048
                     if ppl_task == "wikitext2":
                         eval_data = get_wikitext2(tokenizer, seq_len)
+                        if os.environ.get("FOUROVERSIX_SMOKE_TEST") == "1":
+                            eval_data = eval_data[:2]
+                            print(f"[SMOKE TEST] WikiText-2 PPL blocks: {len(eval_data)}")
                         ppl = compute_perplexity(model, eval_data)
                         results.append(
                             (
@@ -200,6 +204,9 @@ class PTQEvaluator(ABC):
                         del eval_data
                     elif ppl_task == "c4":
                         c4_data = get_c4_eval(tokenizer, seq_len)
+                        if os.environ.get("FOUROVERSIX_SMOKE_TEST") == "1":
+                            c4_data = c4_data[:2]
+                            print(f"[SMOKE TEST] C4 PPL blocks: {len(c4_data)}")
                         ppl = compute_perplexity(model, c4_data)
                         results.append(
                             (

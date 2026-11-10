@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from hashlib import sha256
+import os
 from pathlib import Path
 import random
 from typing import TYPE_CHECKING, Any
@@ -145,8 +146,13 @@ class AWQEvaluator(RTNEvaluatorImpl):
         )(FourOverSixLinearForAWQ)
 
         calibration_seed = getattr(self, "calibration_seed", 42)
+        smoke_test = os.environ.get("FOUROVERSIX_SMOKE_TEST") == "1"
+        sample_count = 2 if smoke_test else 128
+        sequence_length = 512 if smoke_test else 2048
+        if smoke_test:
+            print("[SMOKE TEST] AWQ calibration: C4, 2 x 512 tokens")
         save_path = (
-            save_path / "awq_c4_128x2048_v1" / model_name.strip("/")
+            save_path / f"awq_c4_{sample_count}x{sequence_length}_v1" / model_name.strip("/")
             / f"seed{calibration_seed}" / quantization_config.__hash__()
         )
 
@@ -203,8 +209,8 @@ class AWQEvaluator(RTNEvaluatorImpl):
                     enc,
                     w_bit=16,
                     q_config={"q_group_size": q_group_size, "zero_point": False},
-                    n_samples=128,
-                    seqlen=2048,
+                    n_samples=sample_count,
+                    seqlen=sequence_length,
                     calib_data="c4",
                 )
             if not supplied_samples:
