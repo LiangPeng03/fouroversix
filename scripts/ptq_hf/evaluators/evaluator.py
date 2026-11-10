@@ -144,6 +144,7 @@ class PTQEvaluator(ABC):
                 }
 
             seed = kwargs.pop("seed", None)
+            self.calibration_seed = seed if seed is not None else 42
             if seed is not None:
                 import random
                 import numpy as np
