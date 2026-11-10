@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import contextmanager
 import gc
 from hashlib import sha256
 import os
@@ -101,6 +102,32 @@ def _awq_batch_kwargs(sample_kwargs, start, stop, device):
     return combine(sample_kwargs[start:stop])
 
 
+@contextmanager
+def _awq_cached_weights(block):
+    """Quantize each fixed candidate weight once for all calibration batches."""
+    from fouroversix import quantize
+
+    cached = []
+    try:
+        for module in block.modules():
+            if (isinstance(module, FourOverSixLinearForAWQ)
+                    and not module.high_precision
+                    and not module.config.disable_fprop_quantization):
+                previous = getattr(module, "_quantized_weight", None)
+                cached.append((module, previous))
+                module._quantized_weight = quantize(
+                    module.weight.data, module.config.get_weight_config()
+                )
+        yield
+    finally:
+        for module, previous in cached:
+            if previous is None:
+                if hasattr(module, "_quantized_weight"):
+                    del module._quantized_weight
+            else:
+                module._quantized_weight = previous
+
+
 @torch.no_grad()
 def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_config,
                               batch_size):
@@ -108,19 +135,40 @@ def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_co
     from awq.quantize.quantizer import pseudo_quantize_tensor
 
     device = next(block.parameters()).device
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    cache_budget = int(free_bytes * 0.4)
+    input_bytes = inputs.numel() * inputs.element_size()
+    cache_on_gpu = (
+        os.environ.get("FOUROVERSIX_AWQ_GPU_CACHE", "1") == "1"
+        and 2 * input_bytes < cache_budget
+    )
+    working_inputs = inputs.to(device) if cache_on_gpu else inputs
+    cache_used = input_bytes if cache_on_gpu else 0
     channel_sum = torch.zeros(inputs.shape[-1], dtype=torch.float32)
     num_tokens = 0
     references = []
-    for start in range(0, inputs.shape[0], batch_size):
-        stop = start + batch_size
-        sample = inputs[start:stop]
-        channel_sum += sample.float().abs().reshape(-1, sample.shape[-1]).sum(0)
-        num_tokens += sample.numel() // sample.shape[-1]
-        kwargs = _awq_batch_kwargs(sample_kwargs, start, stop, device)
-        references.append((start, _awq_forward(block, sample.to(device), kwargs).cpu()))
+    with _awq_cached_weights(block):
+        for start in range(0, inputs.shape[0], batch_size):
+            stop = start + batch_size
+            sample = inputs[start:stop]
+            channel_sum += sample.float().abs().reshape(-1, sample.shape[-1]).sum(0)
+            num_tokens += sample.numel() // sample.shape[-1]
+            kwargs = _awq_batch_kwargs(sample_kwargs, start, stop, device)
+            output = _awq_forward(block, working_inputs[start:stop].to(device), kwargs)
+            output_bytes = output.numel() * output.element_size()
+            if cache_on_gpu and cache_used + output_bytes < cache_budget:
+                reference = output
+                cache_used += output_bytes
+            else:
+                reference = output.cpu()
+            references.append((start, reference, kwargs))
+            del output
     x_max = (channel_sum / num_tokens).to(device=device, dtype=inputs.dtype)
+    state = block.state_dict()
+    state_bytes = sum(value.numel() * value.element_size() for value in state.values())
+    state_device = device if cache_on_gpu and cache_used + state_bytes < cache_budget else "cpu"
     original_state = {
-        key: value.detach().cpu().clone() for key, value in block.state_dict().items()
+        key: value.detach().to(state_device).clone() for key, value in state.items()
     }
     best_error = float("inf")
     best_scales = None
@@ -136,17 +184,17 @@ def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_co
                 )
                 linear.weight.copy_(quantized / scales.view(1, -1))
                 del quantized
-            squared_error = 0.0
+            squared_error = torch.zeros((), device=device, dtype=torch.float64)
             num_values = 0
-            for start, reference in references:
-                stop = start + batch_size
-                kwargs = _awq_batch_kwargs(sample_kwargs, start, stop, device)
-                output = _awq_forward(block, inputs[start:stop].to(device), kwargs)
-                error = (reference.to(device) - output).float()
-                squared_error += error.square().sum(dtype=torch.float64).item()
-                num_values += error.numel()
-                del output, error
-            loss = squared_error / num_values
+            with _awq_cached_weights(block):
+                for start, reference, kwargs in references:
+                    stop = start + batch_size
+                    output = _awq_forward(block, working_inputs[start:stop].to(device), kwargs)
+                    error = (reference.to(device) - output).float()
+                    squared_error.add_(error.square().sum(dtype=torch.float64))
+                    num_values += error.numel()
+                    del output, error
+            loss = squared_error.item() / num_values
             if loss < best_error:
                 best_error = loss
                 best_scales = scales.detach().cpu().clone()
