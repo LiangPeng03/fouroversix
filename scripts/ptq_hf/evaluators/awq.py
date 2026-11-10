@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from contextlib import ExitStack
+from collections import defaultdict
+import gc
 from hashlib import sha256
 import os
 from pathlib import Path
 import random
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -58,6 +58,199 @@ def get_awq_calibration_samples(tokenizer, seed, n_samples=128, seqlen=2048):
     print(f"[AWQ calibration] dataset=c4 seed={seed} "
           f"shape={tuple(tokens.shape)} SHA256={digest}")
     return list(tokens.split(1))
+
+
+def _awq_to(value, device):
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device)
+    if isinstance(value, dict):
+        return {key: _awq_to(item, device) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_awq_to(item, device) for item in value)
+    if isinstance(value, list):
+        return [_awq_to(item, device) for item in value]
+    return value
+
+
+def _awq_forward(module, inputs, kwargs):
+    output = module(inputs, **kwargs)
+    return output[0] if isinstance(output, tuple) else output
+
+
+@torch.no_grad()
+def _search_awq_scale_batched(block, linears, inputs, sample_kwargs, w_bit, q_config):
+    """Evaluate each original AWQ candidate over every sequence, one at a time."""
+    from awq.quantize.quantizer import pseudo_quantize_tensor
+
+    device = next(block.parameters()).device
+    channel_sum = torch.zeros(inputs.shape[-1], dtype=torch.float32)
+    num_tokens = 0
+    references = []
+    for index in range(inputs.shape[0]):
+        sample = inputs[index:index + 1]
+        channel_sum += sample.float().abs().reshape(-1, sample.shape[-1]).sum(0)
+        num_tokens += sample.numel() // sample.shape[-1]
+        kwargs = _awq_to(sample_kwargs[index], device)
+        references.append(_awq_forward(block, sample.to(device), kwargs).cpu())
+    x_max = (channel_sum / num_tokens).to(device=device, dtype=inputs.dtype)
+    original_state = {
+        key: value.detach().cpu().clone() for key, value in block.state_dict().items()
+    }
+    best_error = float("inf")
+    best_scales = None
+    try:
+        for candidate in range(20):
+            scales = x_max.pow(candidate / 20).clamp(min=1e-4).view(-1)
+            scales = scales / (scales.max() * scales.min()).sqrt()
+            for linear in linears:
+                linear.weight.mul_(scales.view(1, -1))
+                quantized = (
+                    pseudo_quantize_tensor(linear.weight.data, n_bit=w_bit, **q_config)
+                    if w_bit is not None else linear.weight.data
+                )
+                linear.weight.copy_(quantized / scales.view(1, -1))
+                del quantized
+            squared_error = 0.0
+            num_values = 0
+            for index, reference in enumerate(references):
+                kwargs = _awq_to(sample_kwargs[index], device)
+                output = _awq_forward(block, inputs[index:index + 1].to(device), kwargs)
+                error = (reference.to(device) - output).float()
+                squared_error += error.square().sum(dtype=torch.float64).item()
+                num_values += error.numel()
+                del output, error
+            loss = squared_error / num_values
+            if loss < best_error:
+                best_error = loss
+                best_scales = scales.detach().cpu().clone()
+            block.load_state_dict(original_state)
+    finally:
+        block.load_state_dict(original_state)
+    if best_scales is None or not torch.isfinite(best_scales).all():
+        raise RuntimeError("AWQ scale search produced no finite candidate")
+    return best_scales
+
+
+@torch.no_grad()
+def run_awq_batched(model, samples, w_bit, q_config):
+    """Layer-wise Llama/Qwen AWQ with CPU activation caches and GPU batch size 1."""
+    from awq.quantize import pre_quant
+    from awq.utils.module import append_str_prefix, get_op_name
+    from tqdm import tqdm
+
+    if model.config.model_type not in {"llama", "qwen2", "qwen3"}:
+        raise ValueError(f"Batched AWQ does not support {model.config.model_type}")
+    model.config.use_cache = False
+    model.cpu()
+    torch.cuda.empty_cache()
+    layers = pre_quant.get_blocks(model)
+    captured_inputs = []
+    sample_kwargs = []
+
+    class CaptureComplete(Exception):
+        pass
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inputs, **kwargs):
+            captured_inputs.append(inputs.detach().cpu())
+            sample_kwargs.append(_awq_to(
+                {key: value for key, value in kwargs.items() if key != "use_cache"},
+                "cpu",
+            ))
+            raise CaptureComplete
+
+    original_first = layers[0]
+    layers[0] = Catcher(original_first)
+    try:
+        pre_quant.move_embed(model, "cuda")
+        for sample in samples:
+            try:
+                model(sample.to("cuda"))
+            except CaptureComplete:
+                pass
+    finally:
+        layers[0] = original_first
+        pre_quant.move_embed(model, "cpu")
+    if len(captured_inputs) != len(samples):
+        raise RuntimeError("AWQ did not capture every calibration sequence")
+    inputs = torch.cat(captured_inputs, dim=0)
+    del captured_inputs
+    results = {"scale": [], "clip": []}
+    print(f"[AWQ batched] sequences={len(samples)} seqlen={samples[0].shape[1]} "
+          "GPU batch=1 candidates=20")
+
+    for layer_index, layer in enumerate(tqdm(layers, desc="Running batched AWQ")):
+        torch.cuda.reset_peak_memory_stats()
+        layer.cuda()
+        features = defaultdict(list)
+        handles = []
+        next_inputs = []
+
+        def make_hook(name):
+            def hook(module, args, output):
+                features[name].append(args[0].detach().cpu())
+            return hook
+
+        try:
+            for name, linear in pre_quant.get_named_linears(layer).items():
+                handles.append(linear.register_forward_hook(make_hook(name)))
+            for index in range(inputs.shape[0]):
+                output = _awq_forward(
+                    layer, inputs[index:index + 1].to("cuda"),
+                    _awq_to(sample_kwargs[index], "cuda"),
+                )
+                next_inputs.append(output.cpu())
+                del output
+        finally:
+            for handle in handles:
+                handle.remove()
+        inputs = torch.cat(next_inputs, dim=0)
+        del next_inputs, handles
+        features = {name: torch.cat(parts, dim=0) for name, parts in features.items()}
+        empty_kwargs = [{} for _ in sample_kwargs]
+        specs = [
+            (layer.input_layernorm,
+             [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj],
+             "self_attn.q_proj", layer.self_attn, sample_kwargs),
+        ]
+        if layer.self_attn.v_proj.weight.shape == layer.self_attn.o_proj.weight.shape:
+            specs.append((layer.self_attn.v_proj, [layer.self_attn.o_proj],
+                          "self_attn.o_proj", layer.self_attn.o_proj, empty_kwargs))
+        specs.extend([
+            (layer.post_attention_layernorm, [layer.mlp.gate_proj, layer.mlp.up_proj],
+             "mlp.gate_proj", layer.mlp, empty_kwargs),
+            (layer.mlp.up_proj, [layer.mlp.down_proj],
+             "mlp.down_proj", layer.mlp.down_proj, empty_kwargs),
+        ])
+        scales_list = []
+        for previous, linears, feature_name, inspected, kwargs in specs:
+            scales = _search_awq_scale_batched(
+                inspected, linears, features[feature_name], kwargs, w_bit, q_config
+            )
+            scales_list.append((
+                get_op_name(layer, previous),
+                tuple(get_op_name(layer, linear) for linear in linears),
+                scales,
+            ))
+        pre_quant.apply_scale(layer, scales_list, features)
+        prefix = get_op_name(model, layer) + "."
+        results["scale"] += append_str_prefix(scales_list, prefix)
+        clip_list = pre_quant.auto_clip_block(
+            layer, w_bit=w_bit, q_config=q_config, input_feat=features
+        )
+        pre_quant.apply_clip(layer, clip_list)
+        results["clip"] += append_str_prefix(clip_list, prefix)
+        print(f"[AWQ memory] layer={layer_index} "
+              f"peak_allocated_GiB={torch.cuda.max_memory_allocated() / 2**30:.2f}")
+        layer.cpu()
+        del features, specs, scales_list, clip_list
+        gc.collect()
+        torch.cuda.empty_cache()
+    return results
 
 
 class FourOverSixLinearForAWQ(FourOverSixLinear):
@@ -113,8 +306,7 @@ class AWQEvaluator(RTNEvaluatorImpl):
         """Quantize a model using AWQ."""
 
         import torch
-        from awq.quantize import pre_quant
-        from awq.quantize.pre_quant import apply_awq, run_awq
+        from awq.quantize.pre_quant import apply_awq
         from fouroversix import quantize_model
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -152,7 +344,7 @@ class AWQEvaluator(RTNEvaluatorImpl):
         if smoke_test:
             print("[SMOKE TEST] AWQ calibration: C4, 2 x 512 tokens")
         save_path = (
-            save_path / f"awq_c4_{sample_count}x{sequence_length}_v1" / model_name.strip("/")
+            save_path / f"awq_c4_{sample_count}x{sequence_length}_batch1_v2" / model_name.strip("/")
             / f"seed{calibration_seed}" / quantization_config.__hash__()
         )
 
@@ -173,8 +365,6 @@ class AWQEvaluator(RTNEvaluatorImpl):
                 ),
             )
 
-            import math
-
             config = model.config
             hidden = getattr(config, "hidden_size", None)
             intermediate = getattr(config, "intermediate_size", None)
@@ -186,35 +376,13 @@ class AWQEvaluator(RTNEvaluatorImpl):
                         break
             print(f"[AWQ] Using q_group_size={q_group_size} for hidden={hidden}, intermediate={intermediate}")
 
-            supplied_samples = False
-
-            def load_seeded_samples(data="c4", tokenizer=None,
-                                    n_samples=128, block_size=2048):
-                nonlocal supplied_samples
-                if data != "c4":
-                    raise ValueError(f"Unexpected AWQ calibration dataset: {data}")
-                supplied_samples = True
-                return get_awq_calibration_samples(
-                    tokenizer, calibration_seed, n_samples, block_size
-                )
-
-            with ExitStack() as calibration:
-                from awq.utils import calib_data
-
-                calibration.enter_context(patch.object(calib_data, "get_calib_dataset", load_seeded_samples))
-                if hasattr(pre_quant, "get_calib_dataset"):
-                    calibration.enter_context(patch.object(pre_quant, "get_calib_dataset", load_seeded_samples))
-                awq_results = run_awq(
-                    model,
-                    enc,
-                    w_bit=16,
-                    q_config={"q_group_size": q_group_size, "zero_point": False},
-                    n_samples=sample_count,
-                    seqlen=sequence_length,
-                    calib_data="c4",
-                )
-            if not supplied_samples:
-                raise RuntimeError("Installed AWQ did not call the seeded calibration loader.")
+            samples = get_awq_calibration_samples(
+                enc, calibration_seed, sample_count, sequence_length
+            )
+            awq_results = run_awq_batched(
+                model, samples, w_bit=16,
+                q_config={"q_group_size": q_group_size, "zero_point": False},
+            )
 
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             torch.save(awq_results, save_path)
